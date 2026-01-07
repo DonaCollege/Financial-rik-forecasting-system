@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException
-from backend.data import get_price_data
-from backend.volatility import compute_daily_returns, forecast_volatility
-from backend.schemas import VolatilityResponse
+from VaR import historical_var, parametric_var
+from data import get_price_data
+from volatility import compute_daily_returns, forecast_volatility
+from schemas import VolatilityResponse
 
 app = FastAPI(title="Financial Risk API")
 
@@ -14,12 +15,9 @@ def root():
 @app.get("/prices")
 def get_prices(ticker: str, period: str):
     data = get_price_data(ticker, period)
-
-    data = data.reset_index()  # CRITICAL LINE
+    data = data.reset_index()
     data["Date"] = data["Date"].astype(str)
-
     return data.to_dict(orient="records")
-
 
 
 def risk_label(vol):
@@ -32,24 +30,34 @@ def risk_label(vol):
 
 
 @app.get("/volatility", response_model=VolatilityResponse)
-def get_volatility_endpoint(ticker: str, period: str = "1y"):
-    try:
-        # Step 1: Get price data
-        data = get_price_data(ticker, period)
+def get_volatility(ticker: str, period: str = "1y"):
+    data = get_price_data(ticker, period)
+    returns = compute_daily_returns(data)
+    vol = forecast_volatility(returns)
 
-        # Step 2: Compute returns
-        returns = compute_daily_returns(data)
+    return VolatilityResponse(
+        ticker=ticker,
+        period=period,
+        forecasted_volatility=round(vol, 4),
+        risk_level=risk_label(vol),
+    )
 
-        #Step 3: Forecast volatility
-        vol = forecast_volatility(returns)
 
-        # Step 4: Return structured response
-        return VolatilityResponse(
-            ticker=ticker,
-            period=period,
-            forecasted_volatility=round(vol, 4),
-            risk_level=risk_label(vol)
+@app.get("/var")
+def get_var(ticker: str, period: str = "1y", confidence: float = 0.95):
+    if not 0.9 <= confidence <= 0.999:
+        raise HTTPException(
+            status_code=400,
+            detail="Confidence must be between 0.9 and 0.999",
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    data = get_price_data(ticker, period)
+    returns = data["Close"].pct_change().dropna()
+
+    return {
+        "ticker": ticker,
+        "confidence": confidence,
+        "historical_var": round(historical_var(returns, confidence), 4),
+        "parametric_var": round(parametric_var(returns, confidence), 4),
+    }
+    

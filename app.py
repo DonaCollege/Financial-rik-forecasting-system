@@ -1,15 +1,15 @@
-import streamlit as st  #for UI (seems a good fir for now, can explore others later)
-import plotly.graph_objects as go 
+import streamlit as st
+import plotly.graph_objects as go
+import plotly.express as px
 import requests
 import pandas as pd
 import numpy as np
 
-#layouts 
+BASE_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="Financial Risk Dashboard", layout="wide")
 st.title("Financial Risk Forecasting System")
 
-# Fine for now, have to figure out a way to source the tickers from the db or an api instead of hardcoding
 STOCKS = {
     "Apple": "AAPL",
     "Microsoft": "MSFT",
@@ -20,26 +20,48 @@ STOCKS = {
     "Meta": "META"
 }
 
-#creating boxes for user inputs (check with malhar if more inputs are needed)
 company = st.selectbox("Select a stock", list(STOCKS.keys()))
 ticker = STOCKS[company]
+period = st.text_input("Time period", "1y")
 
-period = st.text_input("Time period (e.g. 1y, 6mo, max)", value="1y")
-
-
-#defining the api endpoints to fetch data from backend
-prices_res = requests.get(
-    "http://127.0.0.1:8000/prices",
-    params={"ticker": ticker, "period": period}
+confidence = st.slider(
+    "Confidence Level",
+    min_value=0.90,
+    max_value=0.99,
+    value=0.95,
+    step=0.01
+)
+var_res = requests.get(
+    "http://127.0.0.1:8000/var",
+    params={
+        "ticker": ticker,
+        "period": period,
+        "confidence": confidence
+    }
 )
 
-vol_res = requests.get(
-    "http://127.0.0.1:8000/volatility",
-    params={"ticker": ticker, "period": period}
+if var_res.status_code != 200:
+    st.error("Failed to fetch VaR data")
+    st.stop()
+
+var_data = var_res.json()
+
+
+prices_res = requests.get(f"{BASE_URL}/prices", params={"ticker": ticker, "period": period})
+vol_res = requests.get(f"{BASE_URL}/volatility", params={"ticker": ticker, "period": period})
+
+var_res = requests.get(
+    f"{BASE_URL}/var",
+    params={
+        "ticker": ticker,
+        "period": period,
+        "confidence": confidence
+    }
 )
+
 
 if prices_res.status_code != 200 or vol_res.status_code != 200:
-    st.error("Backend error while fetching data")
+    st.error("Backend error")
     st.stop()
 
 prices = pd.DataFrame(prices_res.json())
@@ -48,53 +70,63 @@ prices["Date"] = pd.to_datetime(prices["Date"])
 vol = vol_res.json()
 
 st.metric(
-    label="Forecasted Volatility",
-    value=f"{vol['forecasted_volatility']:.2%}",
-    delta=f"Risk: {vol['risk_level']}"
+    "Forecasted Volatility",
+    f"{vol['forecasted_volatility']:.2%}",
+    f"Risk: {vol['risk_level']}"
 )
+
+st.subheader(" Value at Risk (VaR)")
+
+v1, v2 = st.columns(2)
+
+v1.metric(
+    "Historical VaR",
+    f"{var_data['historical_var']:.2%}"
+)
+
+v2.metric(
+    "Parametric VaR",
+    f"{var_data['parametric_var']:.2%}"
+)
+
 
 prices["Returns"] = prices["Close"].pct_change()
+rolling_vol = prices["Returns"].rolling(30).std() * np.sqrt(252)
+returns = prices["Returns"].dropna()
 
-rolling_vol = prices["Returns"].rolling(window=30).std() * np.sqrt(252)
 
-annual_vol = prices["Returns"].std() * np.sqrt(252) * 100
-avg_return = prices["Returns"].mean() * 100
-
-cum_returns = (1 + prices["Returns"]).cumprod()
-drawdown = (cum_returns / cum_returns.cummax() - 1).min() * 100
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Annualized Volatility", f"{annual_vol:.2f}%")
-c2.metric("Avg Daily Return", f"{avg_return:.2f}%")
-c3.metric("Max Drawdown", f"{drawdown:.2f}%")
 
 price_fig = go.Figure()
-price_fig.add_trace(go.Scatter(
-    x=prices["Date"],
-    y=prices["Close"],
-    mode="lines",
-    name="Close Price"
-))
-price_fig.update_layout(
-    title=f"{company} Price",
-    xaxis_title="Date",
-    yaxis_title="Price ($)",
-    hovermode="x unified"
-)
+st.title(f"{company} ({ticker}) Price ")
+price_fig.add_trace(go.Scatter(x=prices["Date"], y=prices["Close"], mode="lines"))
+st.plotly_chart(price_fig, use_container_width=True)
 
 vol_fig = go.Figure()
-vol_fig.add_trace(go.Scatter(
-    x=prices["Date"],
-    y=rolling_vol,
-    mode="lines",
-    name="30-Day Rolling Volatility"
-))
-vol_fig.update_layout(
-    title="Rolling Volatility (Risk)",
-    xaxis_title="Date",
-    yaxis_title="Volatility",
-    hovermode="x unified"
+st.title(f"{company} ({ticker}) Rolling Volatility (30 days)")
+vol_fig.add_trace(go.Scatter(x=prices["Date"], y=rolling_vol, mode="lines"))
+st.plotly_chart(vol_fig, use_container_width=True)
+
+
+hist_fig = px.histogram(
+    returns,
+    nbins=50,
+    title="Return Distribution",
+    labels={"value": "Daily Returns"}
 )
 
-st.plotly_chart(price_fig, use_container_width=True)
-st.plotly_chart(vol_fig, use_container_width=True)
+hist_fig.add_vline(
+    x=var_data["historical_var"],
+    line_dash="dash",
+    line_color="red",
+    annotation_text="Historical VaR",
+    annotation_position="top left"
+)
+
+hist_fig.add_vline(
+    x=var_data["parametric_var"],
+    line_dash="dash",
+    line_color="orange",
+    annotation_text="Parametric VaR",
+    annotation_position="top right"
+)
+st.plotly_chart(hist_fig, use_container_width=True)
